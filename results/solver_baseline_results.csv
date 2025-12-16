@@ -1,0 +1,6 @@
+Instance_Name,Optimal_Makespan,Status,Execution_Time_Sec
+j3010_1.sm,42,OPTIMAL,0.093
+j3010_10.sm,41,OPTIMAL,0.029
+j3010_2.sm,56,OPTIMAL,0.062
+j3010_3.sm,62,OPTIMAL,0.045
+j3010_4.sm,58,OPTIMAL,0.046

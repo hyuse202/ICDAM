@@ -1,0 +1,22 @@
+# Bỏ qua file môi trường ảo (Nặng, không cần thiết)
+.venv/
+venv/
+env/
+
+# Bỏ qua file bảo mật (QUAN TRỌNG NHẤT)
+.env
+*.key
+*.pem
+
+# Bỏ qua các file rác của Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Bỏ qua file log hoặc database tạm
+*.log
+*.sqlite3
+
+# Bỏ qua các file IDE
+.vscode/
+.idea/
