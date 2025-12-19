@@ -248,6 +248,158 @@ def main() -> None:
     
     # Run OptiMUS verification test
     run_verification_test(data_file)
+    
+    # Run OptiMUS self-correction test
+    run_self_correction_test(data_file)
+
+
+def run_self_correction_test(data_file: str) -> None:
+    """
+    OptiMUS Pattern: Test the Self-Correction Loop in ProjectManagerAgent.
+    
+    Phase 3: Demonstrates the complete LLM + Solver feedback loop:
+    1. PM uses LLM to generate initial schedule
+    2. Solver verifies and provides error feedback
+    3. LLM refines schedule based on errors
+    4. Loop until valid or fallback to optimal
+    
+    Args:
+        data_file: Path to PSPLib .sm file.
+    """
+    print("\n")
+    print("=" * 70)
+    print("OPTIMUS PATTERN - Self-Correction Loop Test")
+    print("Phase 3: LLM Schedule Generation with Solver Feedback")
+    print("=" * 70)
+    
+    # -------------------------------------------------------------------------
+    # Step 1: Initialize PM Agent with Solver
+    # -------------------------------------------------------------------------
+    print("\n[STEP 1] Initializing ProjectManagerAgent with Solver Integration")
+    print("-" * 70)
+    
+    if not os.path.exists(data_file):
+        print(f"  [ERROR] File not found: {data_file}")
+        return
+    
+    # Load project data
+    project_data = parse_psplib(data_file)
+    job_data = project_data['jobs']
+    
+    print(f"  [OK] Loaded: {os.path.basename(data_file)}")
+    print(f"       Jobs: {len(job_data)}")
+    print(f"       Resources: {len(project_data['resources'])}")
+    
+    # Create PM agent with solver
+    pm = ProjectManagerAgent(
+        name="PM_OptiMUS",
+        project_data=job_data,
+        data_file_path=data_file
+    )
+    
+    print(f"  [OK] Created {pm.name}")
+    print(f"       Optimal Makespan: {pm.optimal_makespan} days")
+    print(f"       Solver Status: {pm.solver_status}")
+    print(f"       LLM Brain: {'API Mode' if pm.brain.is_api_available() else 'Mock Mode'}")
+    
+    # -------------------------------------------------------------------------
+    # Step 2: Run Self-Correction Loop
+    # -------------------------------------------------------------------------
+    print(f"\n{'='*70}")
+    print("[STEP 2] Running OptiMUS Self-Correction Loop")
+    print("=" * 70)
+    
+    # Call develop_viable_plan with 3 retries
+    schedule, result_info = pm.develop_viable_plan(max_retries=3)
+    
+    # -------------------------------------------------------------------------
+    # Step 3: Display Results
+    # -------------------------------------------------------------------------
+    print(f"\n{'='*70}")
+    print("[STEP 3] Self-Correction Results")
+    print("=" * 70)
+    
+    print(f"\n  [Result Summary]")
+    print(f"  - Method Used: {result_info['method'].upper()}")
+    print(f"  - Total Attempts: {result_info['attempts']}")
+    print(f"  - Success: {result_info['success']}")
+    print(f"  - Final Makespan: {result_info['final_makespan']}")
+    
+    if result_info['method'] == 'llm':
+        print(f"\n  [SUCCESS] LLM generated a valid schedule!")
+        if pm.optimal_makespan:
+            gap = result_info['final_makespan'] - pm.optimal_makespan
+            gap_pct = (gap / pm.optimal_makespan) * 100 if pm.optimal_makespan else 0
+            print(f"  - LLM Makespan: {result_info['final_makespan']}")
+            print(f"  - Optimal Makespan: {pm.optimal_makespan}")
+            print(f"  - Gap: {gap} ({gap_pct:.1f}%)")
+    else:
+        print(f"\n  [FALLBACK] Used OR-Tools optimal schedule (Grounding mechanism)")
+        print(f"  - LLM could not produce valid schedule after {result_info['attempts']} attempts")
+    
+    # Show attempt history
+    if result_info['history']:
+        print(f"\n  [Attempt History]")
+        print("-" * 50)
+        for attempt_log in result_info['history']:
+            attempt_num = attempt_log['attempt']
+            parsed_count = len(attempt_log['parsed_schedule']) if attempt_log['parsed_schedule'] else 0
+            
+            if attempt_log['verification']:
+                is_feasible = attempt_log['verification']['is_feasible']
+                violations = attempt_log['verification']['violation_count']
+                status = "VALID" if is_feasible else f"INVALID ({violations} violations)"
+            else:
+                status = "PARSE FAILED"
+            
+            print(f"    Attempt {attempt_num}: Parsed {parsed_count} jobs -> {status}")
+    
+    # Show schedule preview if successful
+    if schedule and result_info['success']:
+        print(f"\n  [Schedule Preview] (first 10 jobs)")
+        print("-" * 50)
+        for job_id in sorted(schedule.keys())[:10]:
+            start = schedule[job_id]
+            job_data_item = pm.project_data.get(job_id, {})
+            duration = job_data_item.get('duration', 0)
+            print(f"    Job {job_id}: Start={start}, Duration={duration}, End={start + duration}")
+    
+    # -------------------------------------------------------------------------
+    # Step 4: Verify Final Schedule
+    # -------------------------------------------------------------------------
+    if schedule and pm.solver and pm.solver_data:
+        print(f"\n{'='*70}")
+        print("[STEP 4] Final Schedule Verification")
+        print("=" * 70)
+        
+        final_verification = pm.solver.verify_schedule(pm.solver_data, schedule)
+        
+        print(f"\n  [Verification Result]")
+        print(f"  - is_feasible: {final_verification['is_feasible']}")
+        print(f"  - makespan: {final_verification['makespan']}")
+        print(f"  - violations: {len(final_verification['violations'])}")
+        
+        if final_verification['is_feasible']:
+            print(f"\n  [PASS] Final schedule verified as feasible!")
+        else:
+            print(f"\n  [WARNING] Final schedule has issues: {final_verification['error_message'][:100]}...")
+    
+    # -------------------------------------------------------------------------
+    # Summary
+    # -------------------------------------------------------------------------
+    print(f"\n{'='*70}")
+    print("SELF-CORRECTION TEST COMPLETE")
+    print("=" * 70)
+    print("\n[OptiMUS Pattern Summary]")
+    print("  1. LLM Draft: Generate initial schedule from project knowledge")
+    print("  2. Solver Verify: Check precedence + capacity constraints")
+    print("  3. Error Feedback: Detailed violation info sent back to LLM")
+    print("  4. LLM Repair: Refine schedule based on specific errors")
+    print("  5. Grounding Fallback: Use optimal solver schedule if LLM fails")
+    print("\n[Key Achievement]")
+    print("  - LLM reasoning is GROUNDED by symbolic verification")
+    print("  - System NEVER outputs an infeasible schedule")
+    print("=" * 70)
 
 
 def run_verification_test(data_file: str) -> None:
