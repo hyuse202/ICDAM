@@ -1,22 +1,44 @@
 """
 Basic Agent Framework for Multi-Agent System
+ICDAM 2025 - Table 1: Core MAS Infrastructure + Negotiation Layer
+
 Defines base agent structure and specialized agents for RCPSP problem solving.
+Implements state-aware agents following AgentScope patterns with LLM-driven negotiation.
+
+References:
+- AgentScope: AgentBase class and Message Passing architecture
+- REALM-Bench: Benchmark-driven agent evaluation
+- ICDAM 2025: Hybrid LLM Multi-Agent System for SCM
 """
 
 import os
 from datetime import datetime
-from scenarios.rcpsp_scenario import RCPSPScenario
+from typing import Dict, List, Any, Optional, Union
+
+# Import LLMBrain for negotiation layer
+from agents.llm_brain import LLMBrain
+
+# Import Solver components for optimal scheduling
+from solvers.rcpsp_solver import RCPSPSolver, RCPSPParser
+
+# Conditional import for backward compatibility
+try:
+    from scenarios.rcpsp_scenario import RCPSPScenario
+except ImportError:
+    RCPSPScenario = None  # Allow module to work without scenario dependency
 
 
 class BaseAgent:
     """
     Base class for all agents in the Multi-Agent System.
-    Provides core functionality for message handling and reasoning.
+    Provides core functionality for message handling, reasoning, and LLM-driven negotiation.
+    
+    ICDAM 2025: Integrates LLMBrain for natural language negotiation capabilities.
     """
     
     def __init__(self, name, role):
         """
-        Initialize the base agent.
+        Initialize the base agent with LLM Brain.
         
         Args:
             name: Unique identifier for the agent
@@ -24,8 +46,11 @@ class BaseAgent:
         """
         self.name = name
         self.role = role
-        self.memory = []  # List of message dictionaries
+        self.memory = []  # List of message         from solvers.rcpsp_solver import RCPSPSolver, RCPSPParserdictionaries
         self.knowledge_base = ""  # Context/system prompt
+        
+        # ICDAM 2025: LLM Brain for negotiation layer
+        self.brain = LLMBrain()
         
     def receive_message(self, sender, content):
         """
@@ -99,6 +124,503 @@ class BaseAgent:
         """Clear the agent's message memory."""
         self.memory = []
         print(f"[{self.name}] Memory cleared.")
+    
+    def send_negotiation(
+        self, 
+        receiver: 'BaseAgent', 
+        content: str, 
+        msg_type: str = "PROPOSE"
+    ) -> Dict[str, Any]:
+        """
+        Send a negotiation message following AgentScope Message Structure.
+        
+        ICDAM 2025: Implements structured message passing for agent negotiation.
+        
+        Args:
+            receiver: Target agent to receive the message.
+            content: Message content (natural language).
+            msg_type: Message type - one of "PROPOSE", "AGREE", "COUNTER", "REJECT".
+            
+        Returns:
+            Dictionary containing the structured message.
+        """
+        message = {
+            "sender": self.name,
+            "receiver": receiver.name,
+            "content": content,
+            "type": msg_type,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Log in sender's memory
+        self.memory.append({
+            **message,
+            "direction": "sent"
+        })
+        
+        # Deliver to receiver
+        receiver.memory.append({
+            **message,
+            "direction": "received"
+        })
+        
+        print(f"[{self.name}] -> [{receiver.name}] ({msg_type}): {content[:80]}...")
+        
+        return message
+
+
+# =============================================================================
+# ICDAM 2025 Table 1: State-Aware Agents
+# =============================================================================
+
+class WarehouseAgent(BaseAgent):
+    """
+    State-aware Warehouse Agent for resource management.
+    
+    ICDAM 2025 Table 1: Core MAS - WarehouseAgent Implementation.
+    
+    This agent maintains an inventory state loaded from benchmark data
+    and provides resource availability checking functionality.
+    
+    Attributes:
+        inventory: Dictionary mapping resource IDs (R1-R4) to available quantities.
+        state: General state dictionary for extensibility.
+    """
+    
+    def __init__(self, name: str, capacity_data: Dict[str, int]):
+        """
+        Initialize WarehouseAgent with resource capacity data.
+        
+        Args:
+            name: Unique identifier for this agent.
+            capacity_data: Dictionary of resource capacities from PSPLib loader.
+                          Format: {'R1': 24, 'R2': 23, 'R3': 25, 'R4': 33}
+        """
+        super().__init__(name, role="Warehouse Manager")
+        
+        # ICDAM Table 1: State-aware agent with inventory
+        self.inventory: Dict[str, int] = dict(capacity_data)
+        self.state: Dict[str, Any] = {
+            'initialized': True,
+            'total_capacity': sum(capacity_data.values()),
+            'resource_count': len(capacity_data)
+        }
+        
+        # Build knowledge base
+        self._build_knowledge_base()
+    
+    def _build_knowledge_base(self) -> None:
+        """Construct agent's knowledge base from inventory data."""
+        kb_parts = [
+            f"ROLE: {self.role}",
+            f"NAME: {self.name}",
+            "",
+            "INVENTORY STATUS:",
+        ]
+        
+        for resource, capacity in self.inventory.items():
+            kb_parts.append(f"  - {resource}: {capacity} units available")
+        
+        kb_parts.extend([
+            "",
+            "RESPONSIBILITIES:",
+            "  - Track resource inventory levels",
+            "  - Respond to availability queries",
+            "  - Approve or deny resource allocation requests",
+        ])
+        
+        self.knowledge_base = "\n".join(kb_parts)
+    
+    def check_availability(self, resource: str, quantity: int) -> bool:
+        """
+        Check if the warehouse has sufficient quantity of a resource.
+        
+        ICDAM 2025 Table 1: Core availability check method.
+        
+        Args:
+            resource: Resource identifier (e.g., 'R1', 'R2', 'R3', 'R4').
+            quantity: Required quantity.
+            
+        Returns:
+            True if inventory >= quantity, False otherwise.
+        """
+        available = self.inventory.get(resource, 0)
+        return available >= quantity
+    
+    def get_inventory_status(self) -> Dict[str, int]:
+        """
+        Get current inventory levels.
+        
+        Returns:
+            Copy of the inventory dictionary.
+        """
+        return dict(self.inventory)
+    
+    def allocate_resource(self, resource: str, quantity: int) -> bool:
+        """
+        Attempt to allocate (deduct) resources from inventory.
+        
+        Args:
+            resource: Resource identifier.
+            quantity: Amount to allocate.
+            
+        Returns:
+            True if allocation succeeded, False if insufficient inventory.
+        """
+        if self.check_availability(resource, quantity):
+            self.inventory[resource] -= quantity
+            return True
+        return False
+    
+    def release_resource(self, resource: str, quantity: int) -> None:
+        """
+        Release (return) resources back to inventory.
+        
+        Args:
+            resource: Resource identifier.
+            quantity: Amount to release.
+        """
+        if resource in self.inventory:
+            self.inventory[resource] += quantity
+        else:
+            self.inventory[resource] = quantity
+    
+    def process_request(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Process an incoming resource request using LLM-driven decision making.
+        
+        ICDAM 2025: Negotiation Layer - LLM evaluates request against inventory state.
+        
+        Args:
+            message: Incoming negotiation message dict with keys:
+                     'sender', 'receiver', 'content', 'type', 'timestamp'
+                     
+        Returns:
+            Response message dict with LLM-generated content and decision type.
+        """
+        # Build system context with current state
+        system_context = f"""You are a Warehouse Manager named {self.name}.
+Your role is to manage resource inventory and respond to allocation requests.
+
+CURRENT INVENTORY STATUS:
+{self._format_inventory()}
+
+DECISION RULES:
+- If ALL requested resources are available in sufficient quantity: respond with "AGREED" and confirm allocation.
+- If SOME resources are insufficient: respond with "COUNTER" and propose what you CAN provide.
+- If NO resources are available: respond with "REJECT" and explain the shortage.
+
+Keep your response concise and professional (2-3 sentences max).
+Start your response with the decision word: AGREED, COUNTER, or REJECT."""
+
+        # Get incoming request content
+        request_content = message.get('content', '')
+        
+        # Use LLM to generate response
+        llm_response = self.brain.think_with_context(system_context, request_content)
+        
+        # Determine message type from LLM response
+        response_upper = llm_response.upper()
+        if "AGREED" in response_upper:
+            msg_type = "AGREE"
+        elif "COUNTER" in response_upper:
+            msg_type = "COUNTER"
+        else:
+            msg_type = "REJECT"
+        
+        # Construct response message
+        response_message = {
+            "sender": self.name,
+            "receiver": message.get('sender', 'Unknown'),
+            "content": llm_response,
+            "type": msg_type,
+            "timestamp": datetime.now().isoformat(),
+            "in_response_to": message.get('timestamp', '')
+        }
+        
+        # Log in memory
+        self.memory.append({
+            **response_message,
+            "direction": "sent"
+        })
+        
+        return response_message
+    
+    def _format_inventory(self) -> str:
+        """Format inventory for LLM context."""
+        lines = []
+        for resource, quantity in self.inventory.items():
+            lines.append(f"  - {resource}: {quantity} units available")
+        return "\n".join(lines)
+
+
+class ProjectManagerAgent(BaseAgent):
+    """
+    State-aware Project Manager Agent for job scheduling with OR-Tools integration.
+    
+    ICDAM 2025 Table 1: Core MAS - ProjectManagerAgent Implementation.
+    
+    This agent maintains project job data loaded from benchmark files,
+    calculates optimal baseline schedules using OR-Tools CP-SAT solver,
+    and provides job information retrieval functionality.
+    
+    Attributes:
+        project_data: Dictionary mapping job IDs to job details.
+        optimal_makespan: Optimal project duration calculated by solver.
+        optimal_schedule: Detailed schedule with job start/end times.
+        state: General state dictionary for extensibility.
+    """
+    
+    def __init__(
+        self, 
+        name: str, 
+        project_data: Dict[int, Dict[str, Any]],
+        data_file_path: Optional[str] = None
+    ):
+        """
+        Initialize ProjectManagerAgent with job data and compute optimal schedule.
+        
+        Args:
+            name: Unique identifier for this agent.
+            project_data: Dictionary of jobs from PSPLib loader.
+                         Format: {job_id: {'duration': int, 'demands': dict, 'successors': list}}
+            data_file_path: Optional path to PSPLib .sm file for solver optimization.
+                           If provided, solver calculates optimal makespan at init.
+        """
+        super().__init__(name, role="Project Manager")
+        
+        # ICDAM Table 1: State-aware agent with project data
+        self.project_data: Dict[int, Dict[str, Any]] = dict(project_data)
+        
+        # Solver integration: optimal baseline
+        self.optimal_makespan: Optional[int] = None
+        self.optimal_schedule: Optional[Dict[str, Any]] = None
+        self.solver_status: str = "NOT_RUN"
+        
+        # Run solver if data file provided
+        if data_file_path and os.path.exists(data_file_path):
+            self._compute_optimal_baseline(data_file_path)
+        
+        self.state: Dict[str, Any] = {
+            'initialized': True,
+            'total_jobs': len(project_data),
+            'current_job': None,
+            'optimal_makespan': self.optimal_makespan,
+            'solver_status': self.solver_status
+        }
+        
+        # Build knowledge base
+        self._build_knowledge_base()
+    
+    def _compute_optimal_baseline(self, data_file_path: str) -> None:
+        """
+        Compute optimal baseline schedule using OR-Tools CP-SAT solver.
+        
+        ICDAM 2025: Integrates symbolic solver for optimal scheduling.
+        
+        Args:
+            data_file_path: Path to PSPLib .sm file.
+        """
+        try:
+            # Parse the instance using solver's parser
+            parser = RCPSPParser(data_file_path)
+            solver_data = parser.parse()
+            
+            # Solve for optimal makespan
+            solver = RCPSPSolver()
+            makespan, status = solver.solve(solver_data, time_limit_seconds=60)
+            
+            self.optimal_makespan = makespan
+            self.solver_status = status
+            
+            # Log result
+            if makespan is not None:
+                print(f"[{self.name}] Calculated Optimal Baseline: {makespan} days ({status})")
+            else:
+                print(f"[{self.name}] Solver returned no solution ({status})")
+                
+        except Exception as e:
+            print(f"[{self.name}] Solver error: {type(e).__name__}: {e}")
+            self.solver_status = "ERROR"
+    
+    def _build_knowledge_base(self) -> None:
+        """Construct agent's knowledge base from project data."""
+        kb_parts = [
+            f"ROLE: {self.role}",
+            f"NAME: {self.name}",
+            "",
+            f"PROJECT OVERVIEW:",
+            f"  - Total Jobs: {len(self.project_data)}",
+        ]
+        
+        # Add solver result if available
+        if self.optimal_makespan is not None:
+            kb_parts.append(f"  - Optimal Makespan: {self.optimal_makespan} days ({self.solver_status})")
+        
+        kb_parts.append("")
+        kb_parts.append("JOB SUMMARY (first 5 non-dummy jobs):")
+        
+        # Show first 5 non-dummy jobs (job_id > 1, excluding source/sink)
+        shown = 0
+        for job_id in sorted(self.project_data.keys()):
+            if job_id > 1 and shown < 5:
+                job = self.project_data[job_id]
+                duration = job.get('duration', 0)
+                if duration > 0:  # Skip dummy jobs with 0 duration
+                    kb_parts.append(f"  - Job {job_id}: Duration={duration}, Successors={job.get('successors', [])}")
+                    shown += 1
+        
+        kb_parts.extend([
+            "",
+            "RESPONSIBILITIES:",
+            "  - Schedule jobs respecting precedence constraints",
+            "  - Coordinate resource requests with Warehouse",
+            "  - Minimize project makespan",
+        ])
+        
+        self.knowledge_base = "\n".join(kb_parts)
+    
+    def get_job_details(self, job_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Get detailed information about a specific job.
+        
+        ICDAM 2025 Table 1: Core job information retrieval method.
+        
+        Args:
+            job_id: Job identifier (1-indexed as per PSPLib format).
+            
+        Returns:
+            Dictionary with 'duration', 'demands', and 'successors',
+            or None if job_id not found.
+        """
+        job = self.project_data.get(job_id)
+        if job is None:
+            return None
+        
+        return {
+            'duration': job.get('duration', 0),
+            'demands': job.get('demands', {}),
+            'successors': job.get('successors', [])
+        }
+    
+    def get_all_job_ids(self) -> List[int]:
+        """
+        Get list of all job IDs in the project.
+        
+        Returns:
+            Sorted list of job IDs.
+        """
+        return sorted(self.project_data.keys())
+    
+    def get_job_successors(self, job_id: int) -> List[int]:
+        """
+        Get successor jobs for a given job (precedence constraint).
+        
+        Args:
+            job_id: Job identifier.
+            
+        Returns:
+            List of successor job IDs, empty list if not found.
+        """
+        job = self.project_data.get(job_id)
+        if job is None:
+            return []
+        return job.get('successors', [])
+    
+    def set_current_job(self, job_id: int) -> bool:
+        """
+        Set the currently active job for scheduling.
+        
+        Args:
+            job_id: Job identifier to set as current.
+            
+        Returns:
+            True if job exists and was set, False otherwise.
+        """
+        if job_id in self.project_data:
+            self.state['current_job'] = job_id
+            return True
+        return False
+    
+    def request_resources(
+        self, 
+        job_id: int, 
+        warehouse: 'WarehouseAgent'
+    ) -> Dict[str, Any]:
+        """
+        Generate and send a resource request for a specific job using LLM.
+        
+        ICDAM 2025: Negotiation Layer - LLM generates formal resource proposals
+        with solver-computed optimal baseline context.
+        
+        Args:
+            job_id: Job identifier to request resources for.
+            warehouse: Target WarehouseAgent to send request to.
+            
+        Returns:
+            Dictionary containing the sent message, or error info if job not found.
+        """
+        # Get job details
+        job_details = self.get_job_details(job_id)
+        
+        if job_details is None:
+            return {
+                "error": True,
+                "message": f"Job {job_id} not found in project data."
+            }
+        
+        # Format demands for the prompt
+        demands_str = ", ".join([
+            f"{res}: {qty} units" 
+            for res, qty in job_details['demands'].items() 
+            if qty > 0
+        ])
+        
+        if not demands_str:
+            demands_str = "no resources (dummy job)"
+        
+        # Include optimal makespan context if available
+        makespan_context = ""
+        if self.optimal_makespan is not None:
+            makespan_context = f"""
+SOLVER BASELINE:
+- The OR-Tools solver estimates the total project should take {self.optimal_makespan} days.
+- This is the optimal schedule respecting all constraints.
+"""
+        
+        # Construct prompt for LLM to generate formal proposal
+        prompt = f"""You are a Project Manager named {self.name}.
+You need to secure resources for Job #{job_id}.
+
+JOB DETAILS:
+- Duration: {job_details['duration']} time units
+- Resource Requirements: {demands_str}
+- Successor Jobs: {job_details['successors']}
+{makespan_context}
+Write a formal PROPOSAL message to the Warehouse Manager requesting these resources.
+Be professional, concise (2-3 sentences), and clearly state what you need.
+Reference the project timeline if solver baseline is available.
+Start with "PROPOSAL:" followed by your request."""
+
+        # Use LLM to generate the proposal
+        proposal_content = self.brain.think(prompt)
+        
+        # Update current job state
+        self.state['current_job'] = job_id
+        
+        # Send negotiation message to warehouse
+        message = self.send_negotiation(
+            receiver=warehouse,
+            content=proposal_content,
+            msg_type="PROPOSE"
+        )
+        
+        return message
+
+
+# =============================================================================
+# Legacy Agents (Backward Compatibility)
+# =============================================================================
 
 
 class ResourceAgent(BaseAgent):
@@ -185,15 +707,19 @@ class ResourceAgent(BaseAgent):
         return base_thought
 
 
-class ProjectManagerAgent(BaseAgent):
+class LegacyProjectManagerAgent(BaseAgent):
     """
+    Legacy Project Manager Agent (for backward compatibility with RCPSPScenario).
+    
+    NOTE: For new code, use ProjectManagerAgent which accepts PSPLib loader data.
+    
     Specialized agent for managing project tasks and scheduling.
     Handles task allocation, precedence constraints, and timeline optimization.
     """
     
     def __init__(self, name, task_data):
         """
-        Initialize Project Manager Agent.
+        Initialize Legacy Project Manager Agent.
         
         Args:
             name: Agent name
@@ -269,10 +795,16 @@ class ProjectManagerAgent(BaseAgent):
 
 
 def main():
-    """Test the agent framework with a sample scenario."""
+    """Test the agent framework with a sample scenario (legacy mode)."""
     print("=" * 70)
-    print("MULTI-AGENT SYSTEM - Basic Agent Framework Test")
+    print("MULTI-AGENT SYSTEM - Basic Agent Framework Test (Legacy)")
     print("=" * 70)
+    print("\nNOTE: For new state-aware agents, run main_simulation.py instead.\n")
+    
+    # Check if RCPSPScenario is available
+    if RCPSPScenario is None:
+        print("[ERROR] RCPSPScenario not available. Use main_simulation.py instead.")
+        return
     
     # Initialize scenario
     instance_file = os.path.join("data", "raw", "rcpsp", "j30", "j3010_1.sm")
@@ -290,13 +822,13 @@ def main():
     
     print(f" Loaded scenario with {scenario.n_jobs} jobs and {scenario.n_resources} resources")
     
-    # Create agents
+    # Create agents (using legacy agents for backward compatibility)
     print(f"\n{'=' * 70}")
-    print("[2] Creating Agents")
+    print("[2] Creating Agents (Legacy Mode)")
     print("=" * 70)
     
     warehouse_agent = ResourceAgent("Warehouse_A", resource_view)
-    pm_agent = ProjectManagerAgent("PM_B", task_view)
+    pm_agent = LegacyProjectManagerAgent("PM_B", task_view)
     
     print(f"\n Created {warehouse_agent.name} ({warehouse_agent.role})")
     print(f" Created {pm_agent.name} ({pm_agent.role})")
