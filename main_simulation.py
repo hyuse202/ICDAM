@@ -26,6 +26,7 @@ if project_root not in sys.path:
 
 from utils.psplib_loader import parse_psplib, create_dummy_sm_file
 from utils.plan_parser import parse_schedule_from_text, format_schedule_for_display
+from utils.metrics import SimulationMetrics
 from agents.basic_agents import WarehouseAgent, ProjectManagerAgent
 from solvers.rcpsp_solver import RCPSPParser, RCPSPSolver
 
@@ -231,6 +232,8 @@ def run_simulation(data_file: str) -> None:
 def main() -> None:
     """
     Main entry point for the simulation.
+    
+    ICDAM 2025: Orchestrates all test phases and collects Table 3 metrics.
     """
     # Default data file path
     default_data_file = os.path.join(
@@ -243,17 +246,45 @@ def main() -> None:
     else:
         data_file = default_data_file
     
-    # Run main negotiation simulation
+    # =========================================================================
+    # Initialize Metrics Collector (Table 3)
+    # =========================================================================
+    metrics = SimulationMetrics(experiment_name="ICDAM_LLM_MAS_Benchmark")
+    
+    print("\n" + "#" * 70)
+    print("#" + " ICDAM 2025 - FULL SIMULATION PIPELINE ".center(68) + "#")
+    print("#" + " Table 3: Performance Metrics Collection Active ".center(68) + "#")
+    print("#" * 70)
+    
+    # =========================================================================
+    # Phase 1: Run main negotiation simulation
+    # =========================================================================
     run_simulation(data_file)
     
-    # Run OptiMUS verification test
+    # =========================================================================
+    # Phase 2: Run OptiMUS verification test
+    # =========================================================================
     run_verification_test(data_file)
     
-    # Run OptiMUS self-correction test
-    run_self_correction_test(data_file)
+    # =========================================================================
+    # Phase 3: Run OptiMUS self-correction test (with metrics collection)
+    # =========================================================================
+    result_info = run_self_correction_test(data_file, metrics)
+    
+    # =========================================================================
+    # Phase 4: Print Final Metrics Summary (Table 3)
+    # =========================================================================
+    metrics.print_summary()
+    
+    # Also print detailed run log
+    metrics.print_run_details()
+    
+    print("\n" + "#" * 70)
+    print("#" + " ICDAM 2025 - SIMULATION PIPELINE COMPLETE ".center(68) + "#")
+    print("#" * 70)
 
 
-def run_self_correction_test(data_file: str) -> None:
+def run_self_correction_test(data_file: str, metrics: SimulationMetrics = None) -> Dict[str, Any]:
     """
     OptiMUS Pattern: Test the Self-Correction Loop in ProjectManagerAgent.
     
@@ -263,8 +294,14 @@ def run_self_correction_test(data_file: str) -> None:
     3. LLM refines schedule based on errors
     4. Loop until valid or fallback to optimal
     
+    ICDAM 2025: Records run metrics for Table 3 evaluation.
+    
     Args:
         data_file: Path to PSPLib .sm file.
+        metrics: SimulationMetrics collector for recording run data.
+        
+    Returns:
+        Dict with result info including makespan, method, attempts.
     """
     print("\n")
     print("=" * 70)
@@ -385,6 +422,41 @@ def run_self_correction_test(data_file: str) -> None:
             print(f"\n  [WARNING] Final schedule has issues: {final_verification['error_message'][:100]}...")
     
     # -------------------------------------------------------------------------
+    # Record Metrics for Table 3
+    # -------------------------------------------------------------------------
+    if metrics is not None:
+        # Determine if schedule is feasible
+        is_feasible = result_info['success']
+        
+        # Determine method used
+        method = result_info.get('method', 'solver_fallback')
+        
+        # Calculate negotiation rounds (for self-correction, this is the attempts)
+        # In future with multi-agent negotiation, this will be actual rounds
+        negotiation_rounds = 1  # Base negotiation with internal solver
+        
+        # Count messages exchanged (LLM calls)
+        messages_exchanged = result_info['attempts'] * 2  # Ask + Response per attempt
+        
+        # Record the run
+        metrics.record_run(
+            agent_makespan=result_info['final_makespan'],
+            optimal_makespan=pm.optimal_makespan or result_info['final_makespan'],
+            is_feasible=is_feasible,
+            negotiation_rounds=negotiation_rounds,
+            instance_name=os.path.basename(data_file),
+            method_used=method,
+            correction_attempts=result_info['attempts'],
+            messages_exchanged=messages_exchanged,
+            metadata={
+                'solver_status': pm.solver_status,
+                'llm_mode': 'api' if pm.brain.is_api_available() else 'mock',
+                'history': result_info.get('history', [])
+            }
+        )
+        print(f"\n  [METRICS] Run recorded: makespan={result_info['final_makespan']}, method={method}")
+    
+    # -------------------------------------------------------------------------
     # Summary
     # -------------------------------------------------------------------------
     print(f"\n{'='*70}")
@@ -400,6 +472,8 @@ def run_self_correction_test(data_file: str) -> None:
     print("  - LLM reasoning is GROUNDED by symbolic verification")
     print("  - System NEVER outputs an infeasible schedule")
     print("=" * 70)
+    
+    return result_info
 
 
 def run_verification_test(data_file: str) -> None:
