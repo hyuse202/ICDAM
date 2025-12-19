@@ -1,10 +1,13 @@
 """
 RCPSP Solver using Google OR-Tools CP-SAT
 Solves Resource-Constrained Project Scheduling Problem from PSPLib instances.
+
+OptiMUS Pattern Extension: Includes verify_schedule() for LLM + Solver feedback loop.
 """
 
 import os
 import re
+from typing import Dict, List, Any, Optional
 from ortools.sat.python import cp_model
 
 
@@ -183,6 +186,10 @@ class RCPSPSolver:
         """Initialize the solver."""
         self.model = None
         self.solver = None
+        # Store decision variables for solution extraction
+        self._starts = []
+        self._ends = []
+        self._intervals = []
         
     def solve(self, data, time_limit_seconds=300):
         """
@@ -210,10 +217,10 @@ class RCPSPSolver:
         # Compute horizon (upper bound on makespan)
         horizon = sum(durations)
         
-        # Decision variables
-        starts = []
-        ends = []
-        intervals = []
+        # Decision variables - store in instance for later access
+        self._starts = []
+        self._ends = []
+        self._intervals = []
         
         # Create interval variables for each job
         for job in range(n_jobs):
@@ -222,15 +229,15 @@ class RCPSPSolver:
             end = self.model.NewIntVar(0, horizon, f'end_{job}')
             interval = self.model.NewIntervalVar(start, duration, end, f'interval_{job}')
             
-            starts.append(start)
-            ends.append(end)
-            intervals.append(interval)
+            self._starts.append(start)
+            self._ends.append(end)
+            self._intervals.append(interval)
         
         # Add precedence constraints
         for job in range(n_jobs):
             for succ in successors[job]:
                 # End of predecessor <= Start of successor
-                self.model.Add(ends[job] <= starts[succ])
+                self.model.Add(self._ends[job] <= self._starts[succ])
         
         # Add cumulative resource constraints
         for res in range(n_resources):
@@ -241,14 +248,14 @@ class RCPSPSolver:
                 demand = resource_requirements[job][res]
                 if demand > 0:
                     demands.append(demand)
-                    intervals_for_resource.append(intervals[job])
+                    intervals_for_resource.append(self._intervals[job])
             
             if intervals_for_resource:
                 capacity = resource_capacities[res]
                 self.model.AddCumulative(intervals_for_resource, demands, capacity)
         
         # Objective: Minimize the end time of the last job (sink node)
-        self.model.Minimize(ends[n_jobs - 1])
+        self.model.Minimize(self._ends[n_jobs - 1])
         
         # Solve
         self.solver = cp_model.CpSolver()
@@ -268,11 +275,34 @@ class RCPSPSolver:
         status_string = status_dict.get(status, 'UNKNOWN')
         
         if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-            makespan = self.solver.Value(ends[n_jobs - 1])
+            makespan = self.solver.Value(self._ends[n_jobs - 1])
         else:
             makespan = None
         
         return makespan, status_string
+    
+    def get_schedule_dict(self) -> Dict[int, int]:
+        """
+        Extract the solved schedule as a dictionary.
+        
+        OptiMUS Pattern: Provides solver output in format compatible with verify_schedule().
+        
+        Returns:
+            Dictionary mapping job_id (1-indexed) to start_time.
+            Empty dict if no solution available.
+        """
+        if self.solver is None or not self._starts:
+            return {}
+        
+        schedule = {}
+        for job in range(len(self._starts)):
+            try:
+                start_time = self.solver.Value(self._starts[job])
+                schedule[job + 1] = start_time  # 1-indexed
+            except:
+                pass
+        
+        return schedule
     
     def get_solution_details(self, data):
         """
@@ -302,6 +332,203 @@ class RCPSPSolver:
             }
         
         return solution
+
+    def verify_schedule(
+        self, 
+        data: dict, 
+        schedule_dict: dict
+    ) -> dict:
+        """
+        Verify if a proposed schedule satisfies all RCPSP constraints.
+        
+        OptiMUS Pattern: Verification Layer - validates LLM-proposed schedules
+        against precedence and resource capacity constraints WITHOUT solving.
+        
+        This method is crucial for the Feedback Loop: if infeasible, the error
+        message provides specific constraint violation info for LLM refinement.
+        
+        Args:
+            data: Parsed data dictionary from RCPSPParser containing:
+                  - n_jobs: Number of jobs
+                  - durations: List of job durations (0-indexed)
+                  - successors: List of successor lists (0-indexed)
+                  - resource_requirements: List of [R1,R2,R3,R4] per job
+                  - resource_capacities: List of capacities [cap_R1, cap_R2, ...]
+                  
+            schedule_dict: Proposed schedule mapping job_id (1-indexed) to start_time.
+                          Format: {1: 0, 2: 3, 3: 5, ...}
+                          
+        Returns:
+            Dictionary with verification result:
+            {
+                'is_feasible': bool,
+                'error_message': str,  # Empty if feasible, detailed if not
+                'violations': List[dict],  # List of all violations found
+                'makespan': int  # Calculated makespan from schedule
+            }
+        """
+        n_jobs = data['n_jobs']
+        durations = data['durations']
+        successors = data['successors']
+        resource_requirements = data['resource_requirements']
+        resource_capacities = data['resource_capacities']
+        n_resources = data['n_resources']
+        
+        violations = []
+        
+        # Convert 1-indexed schedule to 0-indexed for internal processing
+        schedule_0idx = {}
+        for job_id, start_time in schedule_dict.items():
+            schedule_0idx[job_id - 1] = start_time
+        
+        # ---------------------------------------------------------------------
+        # Check 1: Verify all jobs are scheduled
+        # ---------------------------------------------------------------------
+        missing_jobs = []
+        for job in range(n_jobs):
+            if job not in schedule_0idx:
+                missing_jobs.append(job + 1)  # Report as 1-indexed
+        
+        if missing_jobs:
+            violations.append({
+                'type': 'MISSING_JOBS',
+                'jobs': missing_jobs,
+                'message': f"Missing jobs in schedule: {missing_jobs}"
+            })
+        
+        # If too many jobs missing, return early
+        if len(missing_jobs) > n_jobs // 2:
+            return {
+                'is_feasible': False,
+                'error_message': f"Schedule incomplete: {len(missing_jobs)} jobs missing out of {n_jobs}",
+                'violations': violations,
+                'makespan': -1
+            }
+        
+        # ---------------------------------------------------------------------
+        # Check 2: Precedence Constraints
+        # For each (predecessor, successor) pair: end[pred] <= start[succ]
+        # ---------------------------------------------------------------------
+        for job in range(n_jobs):
+            if job not in schedule_0idx:
+                continue
+                
+            job_start = schedule_0idx[job]
+            job_duration = durations[job]
+            job_end = job_start + job_duration
+            
+            for succ in successors[job]:
+                if succ not in schedule_0idx:
+                    continue
+                    
+                succ_start = schedule_0idx[succ]
+                
+                if job_end > succ_start:
+                    violations.append({
+                        'type': 'PRECEDENCE_VIOLATION',
+                        'predecessor': job + 1,  # 1-indexed for reporting
+                        'successor': succ + 1,
+                        'pred_end': job_end,
+                        'succ_start': succ_start,
+                        'message': (
+                            f"Precedence violation: Job {job + 1} ends at time {job_end}, "
+                            f"but successor Job {succ + 1} starts at time {succ_start} "
+                            f"(must start at or after {job_end})"
+                        )
+                    })
+        
+        # ---------------------------------------------------------------------
+        # Check 3: Resource Capacity Constraints
+        # At any time t: sum(demands of active jobs) <= capacity for each resource
+        # ---------------------------------------------------------------------
+        
+        # Calculate makespan (end time of last scheduled job)
+        makespan = 0
+        for job in range(n_jobs):
+            if job in schedule_0idx:
+                job_end = schedule_0idx[job] + durations[job]
+                makespan = max(makespan, job_end)
+        
+        # For each time point, check resource usage
+        for t in range(makespan + 1):
+            # Calculate resource usage at time t
+            resource_usage = [0] * n_resources
+            active_jobs = []
+            
+            for job in range(n_jobs):
+                if job not in schedule_0idx:
+                    continue
+                    
+                job_start = schedule_0idx[job]
+                job_end = job_start + durations[job]
+                
+                # Job is active at time t if start <= t < end
+                if job_start <= t < job_end:
+                    active_jobs.append(job + 1)
+                    for res in range(n_resources):
+                        resource_usage[res] += resource_requirements[job][res]
+            
+            # Check capacity violations
+            for res in range(n_resources):
+                if resource_usage[res] > resource_capacities[res]:
+                    violations.append({
+                        'type': 'CAPACITY_VIOLATION',
+                        'resource': f'R{res + 1}',
+                        'time': t,
+                        'usage': resource_usage[res],
+                        'capacity': resource_capacities[res],
+                        'active_jobs': active_jobs,
+                        'message': (
+                            f"Resource R{res + 1} overloaded at time {t}: "
+                            f"usage={resource_usage[res]}, capacity={resource_capacities[res]}. "
+                            f"Active jobs: {active_jobs}"
+                        )
+                    })
+        
+        # ---------------------------------------------------------------------
+        # Compile result
+        # ---------------------------------------------------------------------
+        is_feasible = len(violations) == 0
+        
+        if is_feasible:
+            error_message = ""
+        else:
+            # Create summary error message
+            precedence_violations = [v for v in violations if v['type'] == 'PRECEDENCE_VIOLATION']
+            capacity_violations = [v for v in violations if v['type'] == 'CAPACITY_VIOLATION']
+            missing_violations = [v for v in violations if v['type'] == 'MISSING_JOBS']
+            
+            error_parts = []
+            
+            if missing_violations:
+                error_parts.append(missing_violations[0]['message'])
+            
+            if precedence_violations:
+                # Report first precedence violation in detail
+                first_prec = precedence_violations[0]
+                error_parts.append(first_prec['message'])
+                if len(precedence_violations) > 1:
+                    error_parts.append(
+                        f"(+{len(precedence_violations) - 1} more precedence violations)"
+                    )
+            
+            if capacity_violations:
+                # Report first capacity violation in detail
+                first_cap = capacity_violations[0]
+                error_parts.append(first_cap['message'])
+                if len(capacity_violations) > 1:
+                    error_parts.append(
+                        f"(+{len(capacity_violations) - 1} more capacity violations)"
+                    )
+            
+            error_message = " | ".join(error_parts)
+        
+        return {
+            'is_feasible': is_feasible,
+            'error_message': error_message,
+            'violations': violations,
+            'makespan': makespan
+        }
 
 
 def main():
