@@ -25,7 +25,7 @@ class LLMBrain:
         
         # Retrieve configuration
         api_key = os.getenv("GOOGLE_API_KEY")
-        model_name = os.getenv("LLM_MODEL_NAME", "models/gemini-1.5-flash")
+        model_name = os.getenv("LLM_MODEL_NAME", "models/gemini-2.5-flash")
         
         self.model_name = model_name
         self.api_available = False

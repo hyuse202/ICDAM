@@ -269,10 +269,14 @@ class RCPSPSolver:
         
         if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
             makespan = self.solver.Value(ends[n_jobs - 1])
+            schedule = {}
+            for job in range(n_jobs):
+                schedule[job + 1] = self.solver.Value(starts[job])
         else:
             makespan = None
+            schedule = None
         
-        return makespan, status_string
+        return makespan, status_string, schedule
     
     def get_solution_details(self, data):
         """
@@ -302,6 +306,120 @@ class RCPSPSolver:
             }
         
         return solution
+
+
+class RCPSPVerifier:
+    """
+    Verifies a given RCPSP schedule against constraints.
+    Provides detailed feedback on violations.
+    """
+    
+    def verify(self, data, schedule):
+        """
+        Verify the schedule.
+        
+        Args:
+            data: Parsed data dictionary (from RCPSPParser or parse_psplib)
+            schedule: Dict mapping job_id (1-indexed) to start_time
+            
+        Returns:
+            dict: {
+                'is_feasible': bool,
+                'errors': list of strings describing violations
+            }
+        """
+        # Normalize data structure
+        if 'metadata' in data and 'jobs' in data and isinstance(data['jobs'], dict):
+            # Data from parse_psplib
+            n_jobs = data['metadata']['jobs']
+            n_resources = data['metadata']['resources']
+            
+            # Convert jobs dict to lists for easier indexing
+            job_ids = sorted(data['jobs'].keys())
+            durations = [data['jobs'][jid]['duration'] for jid in job_ids]
+            
+            # Map resource names (R1, R2...) to indices
+            res_names = sorted(data['resources'].keys())
+            resource_capacities = [data['resources'][rn] for rn in res_names]
+            
+            resource_requirements = []
+            for jid in job_ids:
+                reqs = [data['jobs'][jid]['demands'].get(rn, 0) for rn in res_names]
+                resource_requirements.append(reqs)
+                
+            successors = []
+            for jid in job_ids:
+                # Convert successor IDs to 0-indexed indices
+                succ_ids = data['jobs'][jid]['successors']
+                successors.append([job_ids.index(sid) for sid in succ_ids if sid in job_ids])
+        else:
+            # Data from RCPSPParser
+            n_jobs = data['n_jobs']
+            n_resources = data['n_resources']
+            durations = data['durations']
+            resource_requirements = data['resource_requirements']
+            successors = data['successors']
+            resource_capacities = data['resource_capacities']
+        
+        errors = []
+        
+        # 1. Check if all jobs are scheduled
+        for i in range(n_jobs):
+            job_id = i + 1
+            if job_id not in schedule:
+                errors.append(f"Job {job_id} is missing from the schedule.")
+        
+        if errors:
+            return {'is_feasible': False, 'errors': errors}
+            
+        # 2. Check precedence constraints
+        for i in range(n_jobs):
+            job_id = i + 1
+            start_i = schedule[job_id]
+            if isinstance(start_i, dict):
+                # Handle case where LLM might return a dict like {"start": 0}
+                start_i = start_i.get('start', 0)
+            
+            end_i = start_i + durations[i]
+            
+            for succ_idx in successors[i]:
+                succ_id = succ_idx + 1
+                start_succ = schedule[succ_id]
+                if end_i > start_succ:
+                    errors.append(f"Precedence violation: Job {job_id} ends at {end_i}, but its successor Job {succ_id} starts at {start_succ}.")
+        
+        # 3. Check resource constraints
+        # Find max end time to define the horizon for checking
+        horizon = 0
+        for i in range(n_jobs):
+            job_id = i + 1
+            horizon = max(horizon, schedule[job_id] + durations[i])
+            
+        for t in range(horizon + 1):
+            resource_usage = [0] * n_resources
+            for i in range(n_jobs):
+                job_id = i + 1
+                start_i = schedule[job_id]
+                if isinstance(start_i, dict):
+                    start_i = start_i.get('start', 0)
+                
+                end_i = start_i + durations[i]
+                
+                if start_i <= t < end_i:
+                    for r in range(n_resources):
+                        resource_usage[r] += resource_requirements[i][r]
+            
+            for r in range(n_resources):
+                if resource_usage[r] > resource_capacities[r]:
+                    errors.append(f"Resource violation at time {t}: Resource R{r+1} usage is {resource_usage[r]}, but capacity is {resource_capacities[r]}.")
+                    if len(errors) > 10:
+                        errors.append("... and more resource violations.")
+                        return {'is_feasible': False, 'errors': errors}
+
+        return {
+            'is_feasible': len(errors) == 0,
+            'errors': errors
+        }
 
 
 def main():

@@ -6,11 +6,7 @@ This module demonstrates the data-driven simulation workflow with LLM negotiatio
 1. Load benchmark data from PSPLib files
 2. Initialize state-aware agents with real project data
 3. Execute LLM-driven resource negotiation between agents
-
-References:
-- AgentScope: Role-based agent initialization and message passing
-- REALM-Bench: Benchmark-driven evaluation
-- ICDAM 2025: Table 1 (Core MAS + Negotiation Layer) + Table 2 (Benchmark Data)
+4. LLM-Solver-Loop for schedule verification and repair
 """
 
 import os
@@ -26,26 +22,13 @@ from utils.psplib_loader import parse_psplib, create_dummy_sm_file
 from agents.basic_agents import WarehouseAgent, ProjectManagerAgent
 
 
-def run_simulation(data_file: str) -> None:
+def run_simulation(data_file: str) -> Dict[str, Any]:
     """
-    Execute the main simulation workflow with LLM-driven negotiation.
-    
-    ICDAM 2025: Integration test demonstrating Table 1 + Table 2 + Negotiation Layer.
-    
-    Workflow:
-    1. Load benchmark data from PSPLib file
-    2. Initialize WarehouseAgent with resource capacities
-    3. Initialize ProjectManagerAgent with job data
-    4. PM generates LLM-driven resource request
-    5. Warehouse processes request with LLM-driven decision
-    6. Display negotiation results
-    
-    Args:
-        data_file: Path to PSPLib .sm file.
+    Execute the main simulation workflow with LLM-driven negotiation and disruption.
     """
     print("=" * 70)
     print("ICDAM 2025 - Multi-Agent System Simulation")
-    print("Phase 2: LLM-Driven Negotiation Layer")
+    print("Phase 3: Dynamic & Disruption Scenarios")
     print("=" * 70)
     
     # -------------------------------------------------------------------------
@@ -54,24 +37,12 @@ def run_simulation(data_file: str) -> None:
     print("\n[STEP 1] Loading Benchmark Data")
     print("-" * 70)
     
-    # Check if file exists, create dummy if needed
     if not os.path.exists(data_file):
-        print(f"  File not found: {data_file}")
-        print("  Creating dummy PSPLib file for immediate testing...")
-        
-        # Create dummy file in the expected location
-        dummy_dir = os.path.dirname(data_file)
-        if dummy_dir:
-            os.makedirs(dummy_dir, exist_ok=True)
         create_dummy_sm_file(data_file)
     
-    # Parse the PSPLib file
     try:
         project_data = parse_psplib(data_file)
         print(f"  [OK] Loaded: {project_data['metadata']['file']}")
-        print(f"       Jobs: {project_data['metadata']['jobs']}")
-        print(f"       Resources: {len(project_data['resources'])} types")
-        print(f"       Capacities: {project_data['resources']}")
     except Exception as e:
         print(f"  [ERROR] Failed to parse file: {e}")
         sys.exit(1)
@@ -79,166 +50,159 @@ def run_simulation(data_file: str) -> None:
     # -------------------------------------------------------------------------
     # Step 2: Initialize State-Aware Agents (Table 1)
     # -------------------------------------------------------------------------
-    print("\n[STEP 2] Initializing State-Aware Agents with LLM Brain + Solver")
+    print("\n[STEP 2] Initializing State-Aware Agents")
     print("-" * 70)
     
-    # Extract data views for agents
-    resource_capacities: Dict[str, int] = project_data['resources']
-    job_data: Dict[int, Dict[str, Any]] = project_data['jobs']
+    resource_capacities = project_data['resources']
+    job_data = project_data['jobs']
     
-    # Initialize WarehouseAgent with resource inventory
-    warehouse = WarehouseAgent(
-        name="Warehouse_Alpha",
-        capacity_data=resource_capacities
-    )
-    print(f"  [OK] Created {warehouse.name}")
-    print(f"       Role: {warehouse.role}")
-    print(f"       Inventory: {warehouse.inventory}")
-    print(f"       LLM Brain: {'API Mode' if warehouse.brain.is_api_available() else 'Mock Mode'}")
+    warehouse = WarehouseAgent(name="Warehouse_Alpha", capacity_data=resource_capacities)
+    pm = ProjectManagerAgent(name="PM_Beta", project_data=job_data, resource_capacities=resource_capacities, data_file_path=data_file)
     
-    # Initialize ProjectManagerAgent with job data AND data file for solver
-    pm = ProjectManagerAgent(
-        name="PM_Beta",
-        project_data=job_data,
-        data_file_path=data_file  # Pass file path for OR-Tools solver
-    )
-    print(f"  [OK] Created {pm.name}")
-    print(f"       Role: {pm.role}")
-    print(f"       Managing: {len(pm.project_data)} jobs")
-    print(f"       Optimal Makespan: {pm.optimal_makespan} days ({pm.solver_status})")
-    print(f"       LLM Brain: {'API Mode' if pm.brain.is_api_available() else 'Mock Mode'}")
+    print(f"  [OK] Agents initialized: {warehouse.name}, {pm.name}")
     
     # -------------------------------------------------------------------------
-    # Step 3: LLM-Driven Negotiation Scenario
+    # Step 3: LLM-Driven Negotiation Layer (Table 1 & 2)
     # -------------------------------------------------------------------------
-    print("\n[STEP 3] LLM-Driven Negotiation: Resource Request for Job #2")
+    print("\n[STEP 3] LLM-Driven Negotiation Layer")
     print("-" * 70)
+    
+    # Simulate a DISRUPTION scenario (Phase 3)
+    disruption_active = True
+    if disruption_active:
+        print("\n[DISRUPTION] Resource Failure Detected: R1 capacity reduced by 50%!")
+        warehouse.inventory['R1'] //= 2
+        warehouse._build_knowledge_base() 
     
     target_job_id = 2
+    print(f"\n  [Context] PM requesting resources for Job #{target_job_id}")
     
-    # Get job details for display
-    job_details = pm.get_job_details(target_job_id)
-    if job_details is None:
-        # Fallback to first available non-dummy job
-        available_jobs = [jid for jid in job_data.keys() if jid > 1]
-        if available_jobs:
-            target_job_id = available_jobs[0]
-            job_details = pm.get_job_details(target_job_id)
+    request_message = pm.request_resources(job_id=target_job_id, warehouse=warehouse)
+    response_message = warehouse.process_request(request_message)
     
-    if job_details:
-        print(f"\n  [Context] Job #{target_job_id} Requirements:")
-        print(f"       Duration: {job_details['duration']} time units")
-        print(f"       Demands: {job_details['demands']}")
-        
-        # ---------------------------------------------------------------------
-        # Phase A: PM generates resource request using LLM
-        # ---------------------------------------------------------------------
-        print(f"\n  {'='*60}")
-        print("  [PHASE A] PM Generates Resource Request (LLM)")
-        print(f"  {'='*60}")
-        
-        request_message = pm.request_resources(
-            job_id=target_job_id,
-            warehouse=warehouse
-        )
-        
-        print(f"\n  [PM Request Content]:")
-        print(f"  {'-'*60}")
-        print(f"  {request_message.get('content', 'N/A')}")
-        print(f"  {'-'*60}")
-        
-        # ---------------------------------------------------------------------
-        # Phase B: Warehouse processes request using LLM
-        # ---------------------------------------------------------------------
-        print(f"\n  {'='*60}")
-        print("  [PHASE B] Warehouse Processes Request (LLM)")
-        print(f"  {'='*60}")
-        
-        response_message = warehouse.process_request(request_message)
-        
-        print(f"\n  [Warehouse Response Content]:")
-        print(f"  {'-'*60}")
-        print(f"  Type: {response_message.get('type', 'N/A')}")
-        print(f"  Content: {response_message.get('content', 'N/A')}")
-        print(f"  {'-'*60}")
-        
-        # ---------------------------------------------------------------------
-        # Phase C: Negotiation Result Summary
-        # ---------------------------------------------------------------------
-        print(f"\n  {'='*60}")
-        print("  [PHASE C] Negotiation Result")
-        print(f"  {'='*60}")
-        
-        result_type = response_message.get('type', 'UNKNOWN')
-        if result_type == "AGREE":
-            print(f"  [RESULT] NEGOTIATION SUCCESSFUL")
-            print(f"           Warehouse agreed to provide resources for Job #{target_job_id}")
-        elif result_type == "COUNTER":
-            print(f"  [RESULT] COUNTER-OFFER RECEIVED")
-            print(f"           Warehouse proposed alternative allocation")
-        else:
-            print(f"  [RESULT] REQUEST DECLINED")
-            print(f"           Warehouse cannot fulfill the request")
-    else:
-        print(f"  [ERROR] Could not retrieve job details for simulation.")
+    print(f"\n  [Warehouse Response Type]: {response_message.get('type')}")
+    print(f"  [Warehouse Response Content]: {response_message.get('content')[:100]}...")
     
     # -------------------------------------------------------------------------
-    # Step 4: Agent Memory Inspection
+    # Step 4: LLM-Solver-Loop (Verify & Repair)
     # -------------------------------------------------------------------------
-    print("\n[STEP 4] Agent Communication History")
+    print("\n[STEP 4] LLM-Solver-Loop: Verify & Repair")
     print("-" * 70)
     
-    print(f"\n  [{pm.name}] Memory ({len(pm.memory)} messages):")
-    for idx, msg in enumerate(pm.memory[-3:], 1):  # Last 3 messages
-        direction = msg.get('direction', 'unknown')
-        msg_type = msg.get('type', 'N/A')
-        content_preview = msg.get('content', '')[:50]
-        print(f"    {idx}. [{direction.upper()}] ({msg_type}) {content_preview}...")
+    from solvers.rcpsp_solver import RCPSPVerifier
+    from utils.parser import JSONParser
     
-    print(f"\n  [{warehouse.name}] Memory ({len(warehouse.memory)} messages):")
-    for idx, msg in enumerate(warehouse.memory[-3:], 1):  # Last 3 messages
-        direction = msg.get('direction', 'unknown')
-        msg_type = msg.get('type', 'N/A')
-        content_preview = msg.get('content', '')[:50]
-        print(f"    {idx}. [{direction.upper()}] ({msg_type}) {content_preview}...")
+    verifier = RCPSPVerifier()
+    jobs_to_schedule = sorted(list(job_data.keys()))[:5]
     
+    pm_prompt = f"""Propose a JSON schedule for jobs {jobs_to_schedule}. 
+RESOURCE CONSTRAINTS (Global Capacities):
+{pm.resource_capacities}
+
+JOB DATA (Durations and Demands):
+{ {jid: pm.get_job_details(jid) for jid in jobs_to_schedule} }
+
+Instructions:
+1. Respect precedence constraints (successors).
+2. Respect resource constraints (total demand at any time t <= capacity).
+3. Provide the schedule in JSON format.
+"""
+    
+    max_attempts = 3
+    current_attempt = 1
+    is_feasible = False
+    
+    while current_attempt <= max_attempts and not is_feasible:
+        print(f"  [Attempt {current_attempt}] PM generating schedule...")
+        llm_response = pm.brain.think(pm_prompt)
+        print(f"  [DEBUG] LLM Response: {llm_response[:200]}...")
+        parsed_schedule = JSONParser.parse_llm_response(llm_response)
+        print(f"  [DEBUG] Parsed Schedule: {parsed_schedule}")
+        
+        proposed_schedule = {}
+        
+        # Helper to extract start time from various value formats
+        def get_start_time(val):
+            if isinstance(val, (int, float)):
+                return int(val)
+            if isinstance(val, dict) and "start_time" in val:
+                return int(val["start_time"])
+            return None
+
+        # 1. Check top-level keys and common nested keys
+        search_dicts = [parsed_schedule]
+        if "function" in parsed_schedule and isinstance(parsed_schedule["function"], dict):
+            search_dicts.append(parsed_schedule["function"])
+        if "schedule" in parsed_schedule and isinstance(parsed_schedule["schedule"], dict):
+            search_dicts.append(parsed_schedule["schedule"])
+            
+        for d in search_dicts:
+            for k, v in d.items():
+                job_id = None
+                if k.isdigit():
+                    job_id = int(k)
+                elif k.lower().startswith("job_") and k[4:].isdigit():
+                    job_id = int(k[4:])
+                elif k.lower().startswith("job ") and k[4:].isdigit():
+                    job_id = int(k[4:])
+                
+                if job_id is not None:
+                    st = get_start_time(v)
+                    if st is not None:
+                        proposed_schedule[job_id] = st
+
+        # 2. Handle list-based formats (e.g., in "function" or "schedule" or top-level if it was a list)
+        search_lists = []
+        if isinstance(parsed_schedule.get("function"), list):
+            search_lists.append(parsed_schedule["function"])
+        if isinstance(parsed_schedule.get("schedule"), list):
+            search_lists.append(parsed_schedule["schedule"])
+        # JSONParser puts the list in "function" if the whole block was a list
+            
+        for l in search_lists:
+            for item in l:
+                if isinstance(item, dict):
+                    jid = item.get("job_id") or item.get("id")
+                    st = item.get("start_time") or item.get("start")
+                    if jid is not None and st is not None:
+                        try:
+                            proposed_schedule[int(jid)] = int(st)
+                        except (ValueError, TypeError):
+                            continue
+            
+        if proposed_schedule:
+            full_schedule = dict(pm.optimal_schedule) if pm.optimal_schedule else {jid: 0 for jid in job_data.keys()}
+            full_schedule.update(proposed_schedule)
+            
+            verification_result = verifier.verify(project_data, full_schedule)
+            if verification_result['is_feasible']:
+                print("  [RESULT] Schedule is FEASIBLE!")
+                is_feasible = True
+            else:
+                print(f"  [RESULT] Schedule is INFEASIBLE: {verification_result['errors'][0]}")
+                pm_prompt = f"Repair this schedule. Errors: {verification_result['errors'][0]}"
+                current_attempt += 1
+        else:
+            print("  [ERROR] Could not parse schedule.")
+            current_attempt += 1
+
     # -------------------------------------------------------------------------
-    # Step 5: Summary
+    # Step 6: Summary
     # -------------------------------------------------------------------------
     print("\n" + "=" * 70)
     print("SIMULATION COMPLETE")
     print("=" * 70)
-    print("\n[Summary]")
-    print(f"  - Benchmark Loader (Table 2): OPERATIONAL")
-    print(f"  - State-Aware Agents (Table 1): OPERATIONAL")
-    print(f"  - LLM Negotiation Layer: OPERATIONAL")
-    print(f"  - Agent Message Passing: VERIFIED")
-    print(f"\n[Components Demonstrated]")
-    print(f"  - LLMBrain.think(): PM generated formal resource proposal")
-    print(f"  - LLMBrain.think_with_context(): Warehouse evaluated against inventory")
-    print(f"  - AgentScope Message Structure: sender/receiver/type/content/timestamp")
-    print(f"\n[Next Phase]")
-    print(f"  - Implement multi-round negotiation protocols")
-    print(f"  - Connect OR-Tools solver for optimal scheduling")
-    print(f"  - Add more agent roles (Supplier, Logistics)")
-    print("=" * 70)
+    
+    return {
+        'negotiation': response_message.get('type'),
+        'feasibility': is_feasible,
+        'attempts': current_attempt if is_feasible else max_attempts,
+        'disruption': disruption_active
+    }
 
 
 def main() -> None:
-    """
-    Main entry point for the simulation.
-    """
-    # Default data file path
-    default_data_file = os.path.join(
-        "data", "raw", "rcpsp", "j30", "j3010_1.sm"
-    )
-    
-    # Allow command-line override
-    if len(sys.argv) > 1:
-        data_file = sys.argv[1]
-    else:
-        data_file = default_data_file
-    
+    data_file = os.path.join("data", "raw", "rcpsp", "j30", "j3010_1.sm")
     run_simulation(data_file)
 
 

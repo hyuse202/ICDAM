@@ -20,6 +20,7 @@ from agents.llm_brain import LLMBrain
 
 # Import Solver components for optimal scheduling
 from solvers.rcpsp_solver import RCPSPSolver, RCPSPParser
+from utils.parser import JSONParser
 
 # Conditional import for backward compatibility
 try:
@@ -295,8 +296,8 @@ class WarehouseAgent(BaseAgent):
             message: Incoming negotiation message dict with keys:
                      'sender', 'receiver', 'content', 'type', 'timestamp'
                      
-        Returns:
-            Response message dict with LLM-generated content and decision type.
+            Returns:
+                Response message dict with LLM-generated content and decision type.
         """
         # Build system context with current state
         system_context = f"""You are a Warehouse Manager named {self.name}.
@@ -306,24 +307,41 @@ CURRENT INVENTORY STATUS:
 {self._format_inventory()}
 
 DECISION RULES:
-- If ALL requested resources are available in sufficient quantity: respond with "AGREED" and confirm allocation.
+- If ALL requested resources are available in sufficient quantity: respond with "AGREED".
 - If SOME resources are insufficient: respond with "COUNTER" and propose what you CAN provide.
 - If NO resources are available: respond with "REJECT" and explain the shortage.
 
-Keep your response concise and professional (2-3 sentences max).
-Start your response with the decision word: AGREED, COUNTER, or REJECT."""
+You must respond in a structured JSON format with the following fields:
+- "thought": Your internal reasoning about the request and inventory.
+- "speak": What you say to the other agent.
+- "decision": One of "AGREED", "COUNTER", "REJECT".
+- "proposal": (Optional) If decision is COUNTER, specify what you can offer.
+
+Example:
+{{
+  "thought": "The PM requested 10 units of R1, but I only have 8. I can offer 8 now and the rest later.",
+  "speak": "I'm sorry, I only have 8 units of R1 available right now. Would you like to take those?",
+  "decision": "COUNTER",
+  "proposal": {{"R1": 8}}
+}}
+"""
 
         # Get incoming request content
         request_content = message.get('content', '')
         
         # Use LLM to generate response
-        llm_response = self.brain.think_with_context(system_context, request_content)
+        llm_response_raw = self.brain.think_with_context(system_context, request_content)
         
-        # Determine message type from LLM response
-        response_upper = llm_response.upper()
-        if "AGREED" in response_upper:
+        # Parse structured response
+        parsed_response = JSONParser.parse_llm_response(llm_response_raw)
+        
+        decision = parsed_response.get("decision", "REJECT").upper()
+        speak_content = parsed_response.get("speak", llm_response_raw)
+        
+        # Determine message type from decision
+        if "AGREED" in decision:
             msg_type = "AGREE"
-        elif "COUNTER" in response_upper:
+        elif "COUNTER" in decision:
             msg_type = "COUNTER"
         else:
             msg_type = "REJECT"
@@ -332,10 +350,14 @@ Start your response with the decision word: AGREED, COUNTER, or REJECT."""
         response_message = {
             "sender": self.name,
             "receiver": message.get('sender', 'Unknown'),
-            "content": llm_response,
+            "content": speak_content,
+            "thought": parsed_response.get("thought", ""),
             "type": msg_type,
             "timestamp": datetime.now().isoformat(),
-            "in_response_to": message.get('timestamp', '')
+            "in_response_to": message.get('timestamp', ''),
+            "metadata": {
+                "proposal": parsed_response.get("proposal", {})
+            }
         }
         
         # Log in memory
@@ -375,6 +397,7 @@ class ProjectManagerAgent(BaseAgent):
         self, 
         name: str, 
         project_data: Dict[int, Dict[str, Any]],
+        resource_capacities: Optional[Dict[str, int]] = None,
         data_file_path: Optional[str] = None
     ):
         """
@@ -384,6 +407,7 @@ class ProjectManagerAgent(BaseAgent):
             name: Unique identifier for this agent.
             project_data: Dictionary of jobs from PSPLib loader.
                          Format: {job_id: {'duration': int, 'demands': dict, 'successors': list}}
+            resource_capacities: Optional dictionary of global resource capacities.
             data_file_path: Optional path to PSPLib .sm file for solver optimization.
                            If provided, solver calculates optimal makespan at init.
         """
@@ -391,6 +415,7 @@ class ProjectManagerAgent(BaseAgent):
         
         # ICDAM Table 1: State-aware agent with project data
         self.project_data: Dict[int, Dict[str, Any]] = dict(project_data)
+        self.resource_capacities: Dict[str, int] = dict(resource_capacities) if resource_capacities else {}
         
         # Solver integration: optimal baseline
         self.optimal_makespan: Optional[int] = None
@@ -406,7 +431,8 @@ class ProjectManagerAgent(BaseAgent):
             'total_jobs': len(project_data),
             'current_job': None,
             'optimal_makespan': self.optimal_makespan,
-            'solver_status': self.solver_status
+            'solver_status': self.solver_status,
+            'resource_capacities': self.resource_capacities
         }
         
         # Build knowledge base
@@ -428,10 +454,11 @@ class ProjectManagerAgent(BaseAgent):
             
             # Solve for optimal makespan
             solver = RCPSPSolver()
-            makespan, status = solver.solve(solver_data, time_limit_seconds=60)
+            makespan, status, schedule = solver.solve(solver_data, time_limit_seconds=60)
             
             self.optimal_makespan = makespan
             self.solver_status = status
+            self.optimal_schedule = schedule
             
             # Log result
             if makespan is not None:
@@ -597,13 +624,22 @@ JOB DETAILS:
 - Resource Requirements: {demands_str}
 - Successor Jobs: {job_details['successors']}
 {makespan_context}
+
 Write a formal PROPOSAL message to the Warehouse Manager requesting these resources.
-Be professional, concise (2-3 sentences), and clearly state what you need.
-Reference the project timeline if solver baseline is available.
-Start with "PROPOSAL:" followed by your request."""
+Respond in a structured JSON format:
+{{
+  "thought": "Your internal reasoning about the project timeline and resource needs.",
+  "speak": "The message you want to send to the Warehouse Manager.",
+  "function": "PROPOSE"
+}}
+"""
 
         # Use LLM to generate the proposal
-        proposal_content = self.brain.think(prompt)
+        llm_response_raw = self.brain.think(prompt)
+        
+        # Parse structured response
+        parsed_response = JSONParser.parse_llm_response(llm_response_raw)
+        proposal_content = parsed_response.get("speak", llm_response_raw)
         
         # Update current job state
         self.state['current_job'] = job_id
@@ -614,6 +650,9 @@ Start with "PROPOSAL:" followed by your request."""
             content=proposal_content,
             msg_type="PROPOSE"
         )
+        
+        # Add thought to message
+        message["thought"] = parsed_response.get("thought", "")
         
         return message
 
