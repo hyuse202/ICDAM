@@ -207,25 +207,26 @@ Instructions:
 def main() -> None:
     data_file = os.path.join("data", "raw", "rcpsp", "j30", "j3010_1.sm")
     run_simulation(data_file)
-    
+
     # =========================================================================
     # Phase 2: Run OptiMUS verification test
     # =========================================================================
     run_verification_test(data_file)
-    
+
     # =========================================================================
     # Phase 3: Run OptiMUS self-correction test (with metrics collection)
     # =========================================================================
+    metrics = SimulationMetrics()
     result_info = run_self_correction_test(data_file, metrics)
-    
+
     # =========================================================================
     # Phase 4: Print Final Metrics Summary (Table 3)
     # =========================================================================
     metrics.print_summary()
-    
+
     # Also print detailed run log
     metrics.print_run_details()
-    
+
     print("\n" + "#" * 70)
     print("#" + " ICDAM 2025 - SIMULATION PIPELINE COMPLETE ".center(68) + "#")
     print("#" * 70)
@@ -372,8 +373,8 @@ def run_self_correction_test(data_file: str, metrics: SimulationMetrics = None) 
     # Record Metrics for Table 3
     # -------------------------------------------------------------------------
     if metrics is not None:
-        # Determine if schedule is feasible
-        is_feasible = result_info['success']
+        # Determine if schedule is feasible (LLM or solver fallback)
+        is_feasible = result_info['success'] or result_info['method'] == 'solver_fallback'
         
         # Determine method used
         method = result_info.get('method', 'solver_fallback')
@@ -634,7 +635,7 @@ def run_verification_test(data_file: str) -> None:
     solver_c = RCPSPSolver()
     
     print(f"\n  [Computing optimal schedule with OR-Tools...]")
-    makespan, status = solver_c.solve(data, time_limit_seconds=60)
+    makespan, status, _ = solver_c.solve(data, time_limit_seconds=60)
     
     if makespan is not None and status in ['OPTIMAL', 'FEASIBLE']:
         print(f"  Solver found solution: makespan={makespan}, status={status}")

@@ -275,10 +275,10 @@ class RCPSPSolver:
         status_string = status_dict.get(status, 'UNKNOWN')
         
         if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-            makespan = self.solver.Value(ends[n_jobs - 1])
+            makespan = self.solver.Value(self._ends[n_jobs - 1])
             schedule = {}
             for job in range(n_jobs):
-                schedule[job + 1] = self.solver.Value(starts[job])
+                schedule[job + 1] = self.solver.Value(self._starts[job])
         else:
             makespan = None
             schedule = None

@@ -464,25 +464,25 @@ class ProjectManagerAgent(BaseAgent):
             # Parse the instance using solver's parser
             self.parser = RCPSPParser(data_file_path)
             self.solver_data = self.parser.parse()
-            
+
             # Solve for optimal makespan
-            solver = RCPSPSolver()
-            makespan, status, schedule = solver.solve(solver_data, time_limit_seconds=60)
-            
+            self.solver = RCPSPSolver()
+            makespan, status, schedule = self.solver.solve(self.solver_data, time_limit_seconds=60)
+
             self.optimal_makespan = makespan
             self.solver_status = status
             self.optimal_schedule = schedule
-            
+
             # OptiMUS: Extract and store optimal schedule for grounding fallback
             if makespan is not None:
                 self.optimal_schedule = self.solver.get_schedule_dict()
-            
+
             # Log result
             if makespan is not None:
                 print(f"[{self.name}] Calculated Optimal Baseline: {makespan} days ({status})")
             else:
                 print(f"[{self.name}] Solver returned no solution ({status})")
-                
+
         except Exception as e:
             print(f"[{self.name}] Solver error: {type(e).__name__}: {e}")
             self.solver_status = "ERROR"
