@@ -8,12 +8,13 @@ Implements state-aware agents following AgentScope patterns with LLM-driven nego
 References:
 - AgentScope: AgentBase class and Message Passing architecture
 - REALM-Bench: Benchmark-driven agent evaluation
+- OptiMUS: Self-Correction Loop (LLM + Solver Feedback)
 - ICDAM 2025: Hybrid LLM Multi-Agent System for SCM
 """
 
 import os
 from datetime import datetime
-from typing import Dict, List, Any, Optional, Union
+from typing import Dict, List, Any, Optional, Union, Tuple
 
 # Import LLMBrain for negotiation layer
 from agents.llm_brain import LLMBrain
@@ -21,6 +22,9 @@ from agents.llm_brain import LLMBrain
 # Import Solver components for optimal scheduling
 from solvers.rcpsp_solver import RCPSPSolver, RCPSPParser
 from utils.parser import JSONParser
+
+# Import Plan Parser for OptiMUS Self-Correction Loop
+from utils.plan_parser import parse_schedule_from_text, format_schedule_for_display
 
 # Conditional import for backward compatibility
 try:
@@ -417,10 +421,18 @@ class ProjectManagerAgent(BaseAgent):
         self.project_data: Dict[int, Dict[str, Any]] = dict(project_data)
         self.resource_capacities: Dict[str, int] = dict(resource_capacities) if resource_capacities else {}
         
+        # Store data file path for OptiMUS self-correction
+        self.data_file_path: Optional[str] = data_file_path
+        
         # Solver integration: optimal baseline
         self.optimal_makespan: Optional[int] = None
-        self.optimal_schedule: Optional[Dict[str, Any]] = None
+        self.optimal_schedule: Optional[Dict[int, int]] = None
         self.solver_status: str = "NOT_RUN"
+        
+        # OptiMUS: Store solver and parser for self-correction loop
+        self.solver: Optional[RCPSPSolver] = None
+        self.parser: Optional[RCPSPParser] = None
+        self.solver_data: Optional[Dict[str, Any]] = None
         
         # Run solver if data file provided
         if data_file_path and os.path.exists(data_file_path):
@@ -443,14 +455,15 @@ class ProjectManagerAgent(BaseAgent):
         Compute optimal baseline schedule using OR-Tools CP-SAT solver.
         
         ICDAM 2025: Integrates symbolic solver for optimal scheduling.
+        OptiMUS: Stores solver/parser for self-correction loop.
         
         Args:
             data_file_path: Path to PSPLib .sm file.
         """
         try:
             # Parse the instance using solver's parser
-            parser = RCPSPParser(data_file_path)
-            solver_data = parser.parse()
+            self.parser = RCPSPParser(data_file_path)
+            self.solver_data = self.parser.parse()
             
             # Solve for optimal makespan
             solver = RCPSPSolver()
@@ -459,6 +472,10 @@ class ProjectManagerAgent(BaseAgent):
             self.optimal_makespan = makespan
             self.solver_status = status
             self.optimal_schedule = schedule
+            
+            # OptiMUS: Extract and store optimal schedule for grounding fallback
+            if makespan is not None:
+                self.optimal_schedule = self.solver.get_schedule_dict()
             
             # Log result
             if makespan is not None:
@@ -655,6 +672,212 @@ Respond in a structured JSON format:
         message["thought"] = parsed_response.get("thought", "")
         
         return message
+
+    def develop_viable_plan(
+        self, 
+        max_retries: int = 3
+    ) -> Tuple[Dict[int, int], Dict[str, Any]]:
+        """
+        OptiMUS Self-Correction Loop: Iteratively refine schedule using LLM + Solver feedback.
+        
+        This method implements the core OptiMUS pattern:
+        1. LLM generates initial schedule proposal
+        2. Solver verifies feasibility
+        3. If infeasible, error feedback sent to LLM for repair
+        4. Loop until feasible or max retries reached
+        5. Fallback to optimal solver schedule (Grounding mechanism)
+        
+        ICDAM 2025: Key contribution - hybrid LLM reasoning with symbolic verification.
+        
+        Args:
+            max_retries: Maximum number of LLM repair attempts before fallback.
+            
+        Returns:
+            Tuple of (schedule_dict, result_info):
+            - schedule_dict: Valid schedule {job_id: start_time}
+            - result_info: Metadata about the process
+        """
+        result_info = {
+            'method': 'llm',  # 'llm' or 'solver_fallback'
+            'attempts': 0,
+            'history': [],
+            'final_makespan': None,
+            'success': False
+        }
+        
+        # Check prerequisites
+        if self.solver is None or self.solver_data is None:
+            print(f"[{self.name}] ERROR: Solver not initialized. Cannot develop plan.")
+            if self.optimal_schedule:
+                result_info['method'] = 'solver_fallback'
+                result_info['success'] = True
+                result_info['final_makespan'] = self.optimal_makespan
+                return self.optimal_schedule, result_info
+            return {}, result_info
+        
+        # Build project context for LLM
+        project_context = self._build_scheduling_context()
+        
+        # Step 1: Ask LLM to generate initial schedule
+        print(f"\n[{self.name}] OptiMUS Self-Correction Loop Started (max_retries={max_retries})")
+        print("-" * 60)
+        
+        initial_prompt = f"""You are a Project Manager creating a schedule for an RCPSP project.
+
+{project_context}
+
+TASK: Create a feasible schedule that respects ALL precedence constraints.
+- A job can only start AFTER all its predecessors have completed.
+- Format your answer as: Job 1: Start 0, Job 2: Start X, Job 3: Start Y, ...
+- Include ALL {len(self.project_data)} jobs in your schedule.
+- Job 1 (dummy start) should start at time 0.
+- Job {len(self.project_data)} (dummy end) should start after all predecessors complete.
+
+Provide the complete schedule now:"""
+
+        current_prompt = initial_prompt
+        schedule = {}
+        
+        for attempt in range(1, max_retries + 1):
+            result_info['attempts'] = attempt
+            print(f"\n[Attempt {attempt}/{max_retries}] Asking LLM to generate schedule...")
+            
+            # Get LLM response
+            llm_response = self.brain.think(current_prompt)
+            
+            # Log attempt
+            attempt_log = {
+                'attempt': attempt,
+                'prompt_preview': current_prompt[:200] + "...",
+                'response_preview': llm_response[:200] + "...",
+                'parsed_schedule': None,
+                'verification': None
+            }
+            
+            print(f"[Attempt {attempt}] LLM Response: {llm_response[:100]}...")
+            
+            # Step 2: Parse LLM output
+            schedule = parse_schedule_from_text(llm_response)
+            attempt_log['parsed_schedule'] = schedule
+            
+            if not schedule:
+                print(f"[Attempt {attempt}] FAILED: Could not parse schedule from LLM output")
+                
+                # Create repair prompt for parsing failure
+                current_prompt = f"""Your previous response could not be parsed into a schedule.
+
+Please provide the schedule in this EXACT format:
+Job 1: Start 0, Job 2: Start 3, Job 3: Start 5, Job 4: Start 8, ...
+
+Include ALL {len(self.project_data)} jobs. Each job needs "Job X: Start Y" format.
+Try again:"""
+                
+                result_info['history'].append(attempt_log)
+                continue
+            
+            print(f"[Attempt {attempt}] Parsed {len(schedule)} jobs from LLM output")
+            
+            # Step 3: Verify with solver
+            verification = self.solver.verify_schedule(self.solver_data, schedule)
+            attempt_log['verification'] = {
+                'is_feasible': verification['is_feasible'],
+                'error_preview': verification['error_message'][:200] if verification['error_message'] else '',
+                'violation_count': len(verification['violations'])
+            }
+            
+            if verification['is_feasible']:
+                # SUCCESS! Schedule is valid
+                print(f"[Attempt {attempt}] SUCCESS! Schedule is feasible. Makespan: {verification['makespan']}")
+                result_info['success'] = True
+                result_info['method'] = 'llm'
+                result_info['final_makespan'] = verification['makespan']
+                result_info['history'].append(attempt_log)
+                
+                return schedule, result_info
+            
+            else:
+                # FAILED: Create repair prompt with error feedback
+                error_msg = verification['error_message']
+                print(f"[Attempt {attempt}] FAILED: {error_msg[:100]}...")
+                
+                # Build specific repair prompt based on violation type
+                violations = verification['violations']
+                
+                repair_prompt = f"""Your proposed schedule is INVALID.
+
+ERROR DETAILS:
+{error_msg}
+
+VIOLATION SUMMARY:
+- Precedence violations: {len([v for v in violations if v['type'] == 'PRECEDENCE_VIOLATION'])}
+- Capacity violations: {len([v for v in violations if v['type'] == 'CAPACITY_VIOLATION'])}
+- Missing jobs: {len([v for v in violations if v['type'] == 'MISSING_JOBS'])}
+
+{project_context}
+
+REPAIR INSTRUCTIONS:
+1. Review the precedence constraints carefully.
+2. A successor job MUST start at or after its predecessor ENDS (start + duration).
+3. Fix the violations mentioned above.
+
+Provide the CORRECTED schedule in format: Job 1: Start 0, Job 2: Start X, ...
+Include ALL {len(self.project_data)} jobs:"""
+
+                current_prompt = repair_prompt
+                result_info['history'].append(attempt_log)
+        
+        # Step 4: Fallback to optimal solver schedule (Grounding mechanism)
+        print(f"\n[{self.name}] LLM failed after {max_retries} attempts. Falling back to OR-Tools optimal schedule.")
+        
+        if self.optimal_schedule:
+            result_info['method'] = 'solver_fallback'
+            result_info['success'] = True
+            result_info['final_makespan'] = self.optimal_makespan
+            print(f"[{self.name}] Using optimal schedule with makespan: {self.optimal_makespan}")
+            return self.optimal_schedule, result_info
+        else:
+            print(f"[{self.name}] ERROR: No fallback schedule available!")
+            return {}, result_info
+    
+    def _build_scheduling_context(self) -> str:
+        """
+        Build project context string for LLM scheduling prompts.
+        
+        Returns:
+            Formatted string with job details and constraints.
+        """
+        lines = [
+            f"PROJECT: {len(self.project_data)} jobs total",
+            f"OPTIMAL BASELINE: {self.optimal_makespan} time units (computed by OR-Tools)",
+            "",
+            "JOB DETAILS (job_id: duration, predecessors):"
+        ]
+        
+        # Build predecessor map from successor data
+        predecessors: Dict[int, List[int]] = {job_id: [] for job_id in self.project_data.keys()}
+        for job_id, job in self.project_data.items():
+            for succ in job.get('successors', []):
+                if succ in predecessors:
+                    predecessors[succ].append(job_id)
+        
+        # List all jobs with their constraints
+        for job_id in sorted(self.project_data.keys()):
+            job = self.project_data[job_id]
+            duration = job.get('duration', 0)
+            preds = predecessors.get(job_id, [])
+            
+            if preds:
+                preds_str = f", must start after jobs {preds} complete"
+            else:
+                preds_str = ", no predecessors (can start at time 0)"
+            
+            lines.append(f"  Job {job_id}: duration={duration}{preds_str}")
+        
+        lines.append("")
+        lines.append("PRECEDENCE RULE: Job X can start only when ALL its predecessors have finished.")
+        lines.append("                 (predecessor_start + predecessor_duration <= job_start)")
+        
+        return "\n".join(lines)
 
 
 # =============================================================================
